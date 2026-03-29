@@ -92,9 +92,11 @@ async def download(req: DownloadRequest):
                 "--audio-quality", "0",
                 "--embed-thumbnail",
                 "--add-metadata",
+                # Contorna bloqueio de login / bot detection
                 "--extractor-args", "youtube:player_client=android,ios;player_skip=web,configs",
                 "--no-check-certificates",
                 "--user-agent", "com.google.android.youtube/19.05.36 (Linux; U; Android 14; pt_BR; Pixel 7 Pro) gzip",
+                "--force-ipv4",  # importante no Render
                 "--no-playlist" if "list=" not in url else "--yes-playlist",
                 "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
                 url,
@@ -118,7 +120,7 @@ async def download(req: DownloadRequest):
             shutil.rmtree(job_dir, ignore_errors=True)
             raise HTTPException(
                 status_code=500,
-                detail=f"Download failed. Check the URL.\n\n{stderr[-800:]}"
+                detail=f"Download failed.\n\n{stderr[-800:]}"
             )
 
         files = list(job_dir.glob("*"))
@@ -126,7 +128,7 @@ async def download(req: DownloadRequest):
             shutil.rmtree(job_dir, ignore_errors=True)
             raise HTTPException(
                 status_code=500,
-                detail="No files generated. Invalid URL or unavailable content."
+                detail="No files generated. Invalid or unavailable content."
             )
 
         zip_path = TMP_DIR / f"{job_id}.zip"
