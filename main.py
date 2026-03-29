@@ -4,8 +4,10 @@ FastAPI + yt-dlp + spotdl
 Supports: Spotify, YouTube, SoundCloud
 """
 
+import os
 import re
 import uuid
+import base64
 import shutil
 import asyncio
 import tempfile
@@ -14,7 +16,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="Watanagashi Downloader API")
@@ -28,6 +30,8 @@ app.add_middleware(
 
 TMP_DIR = Path(tempfile.gettempdir()) / "wata_downloads"
 TMP_DIR.mkdir(exist_ok=True)
+
+COOKIES_FILE = TMP_DIR / "yt_cookies.txt"
 
 
 class DownloadRequest(BaseModel):
@@ -43,6 +47,10 @@ def detect_source(url: str) -> str:
     if "soundcloud.com" in url:
         return "soundcloud"
     raise ValueError("URL not recognized. Supported: Spotify, YouTube, SoundCloud.")
+
+
+def has_yt_cookies() -> bool:
+    return COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
 
 async def run(cmd: list[str], cwd: str) -> tuple[int, str, str]:
@@ -61,19 +69,31 @@ def root():
     return {"status": "ok", "message": "Watanagashi Downloader API is running."}
 
 
+@app.get("/yt-status")
+def yt_status():
+    """Returns whether YouTube cookies are configured on the server."""
+    return {"youtube_enabled": has_yt_cookies()}
+
+
 @app.post("/download")
 async def download(req: DownloadRequest):
     url = req.url.strip()
     fmt = req.format if req.format in ("mp3", "flac", "ogg") else "mp3"
 
-    job_id = uuid.uuid4().hex
-    job_dir = TMP_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
     try:
         source = detect_source(url)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if source == "youtube" and not has_yt_cookies():
+        raise HTTPException(
+            status_code=503,
+            detail="YouTube downloads are not available at this time. The server administrator needs to configure authentication cookies."
+        )
+
+    job_id = uuid.uuid4().hex
+    job_dir = TMP_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         if source == "spotify":
@@ -92,11 +112,9 @@ async def download(req: DownloadRequest):
                 "--audio-quality", "0",
                 "--embed-thumbnail",
                 "--add-metadata",
-                # Contorna bloqueio de login / bot detection
-                "--extractor-args", "youtube:player_client=android,ios;player_skip=web,configs",
+                "--cookies", str(COOKIES_FILE),
                 "--no-check-certificates",
-                "--user-agent", "com.google.android.youtube/19.05.36 (Linux; U; Android 14; pt_BR; Pixel 7 Pro) gzip",
-                "--force-ipv4",  # importante no Render
+                "--force-ipv4",
                 "--no-playlist" if "list=" not in url else "--yes-playlist",
                 "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
                 url,
@@ -155,9 +173,22 @@ async def download(req: DownloadRequest):
 
 
 @app.on_event("startup")
-async def cleanup_old_files():
+async def setup():
+    # Limpa ZIPs antigos
     for f in TMP_DIR.glob("*.zip"):
         try:
             f.unlink()
         except Exception:
             pass
+
+    # Decodifica cookies do env e salva em arquivo
+    b64 = os.environ.get("YT_COOKIES_B64", "").strip()
+    if b64:
+        try:
+            decoded = base64.b64decode(b64)
+            COOKIES_FILE.write_bytes(decoded)
+            print(f"[startup] YouTube cookies loaded ({len(decoded)} bytes).")
+        except Exception as e:
+            print(f"[startup] Failed to decode YT_COOKIES_B64: {e}")
+    else:
+        print("[startup] YT_COOKIES_B64 not set — YouTube downloads disabled.")
