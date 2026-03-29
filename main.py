@@ -83,8 +83,8 @@ async def download(req: DownloadRequest):
                 "--output", str(job_dir),
                 url,
             ]
-               elif source == "youtube":
-            # Usando apenas clientes mobile e Android para evitar o bloqueio de 'initial data'
+
+        elif source == "youtube":
             cmd = [
                 "yt-dlp",
                 "-x",
@@ -92,7 +92,6 @@ async def download(req: DownloadRequest):
                 "--audio-quality", "0",
                 "--embed-thumbnail",
                 "--add-metadata",
-                # O segredo está aqui: removemos 'web' e usamos 'android' ou 'ios'
                 "--extractor-args", "youtube:player_client=android,ios;player_skip=web,configs",
                 "--no-check-certificates",
                 "--user-agent", "com.google.android.youtube/19.05.36 (Linux; U; Android 14; pt_BR; Pixel 7 Pro) gzip",
@@ -100,7 +99,7 @@ async def download(req: DownloadRequest):
                 "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
                 url,
             ]
-           
+
         else:  # soundcloud
             cmd = [
                 "yt-dlp",
@@ -125,7 +124,10 @@ async def download(req: DownloadRequest):
         files = list(job_dir.glob("*"))
         if not files:
             shutil.rmtree(job_dir, ignore_errors=True)
-            raise HTTPException(status_code=500, detail="No files generated. Invalid URL or unavailable content.")
+            raise HTTPException(
+                status_code=500,
+                detail="No files generated. Invalid URL or unavailable content."
+            )
 
         zip_path = TMP_DIR / f"{job_id}.zip"
         shutil.make_archive(str(TMP_DIR / job_id), "zip", str(job_dir))
