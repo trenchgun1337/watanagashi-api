@@ -1,1 +1,6 @@
-
+services:
+  - type: web
+    name: watanagashi-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /
