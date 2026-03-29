@@ -2,5 +2,5 @@ fastapi==0.103.2
 uvicorn[standard]==0.23.2
 yt-dlp>=2025.01.15
 spotdl>=4.2.11
-pydantic==2.7.1
+pydantic>=2.9.2
 python-multipart
