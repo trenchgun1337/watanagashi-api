@@ -83,8 +83,8 @@ async def download(req: DownloadRequest):
                 "--output", str(job_dir),
                 url,
             ]
-        elif source == "youtube":
-            # Use iOS client to bypass YouTube bot detection
+               elif source == "youtube":
+            # Usando apenas clientes mobile e Android para evitar o bloqueio de 'initial data'
             cmd = [
                 "yt-dlp",
                 "-x",
@@ -92,12 +92,15 @@ async def download(req: DownloadRequest):
                 "--audio-quality", "0",
                 "--embed-thumbnail",
                 "--add-metadata",
-                "--extractor-args", "youtube:player_client=ios,web",
+                # O segredo está aqui: removemos 'web' e usamos 'android' ou 'ios'
+                "--extractor-args", "youtube:player_client=android,ios;player_skip=web,configs",
                 "--no-check-certificates",
-                "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-                "-o", str(job_dir / "%(playlist_index)s - %(title)s.%(ext)s"),
+                "--user-agent", "com.google.android.youtube/19.05.36 (Linux; U; Android 14; pt_BR; Pixel 7 Pro) gzip",
+                "--no-playlist" if "list=" not in url else "--yes-playlist",
+                "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
                 url,
             ]
+           
         else:  # soundcloud
             cmd = [
                 "yt-dlp",
