@@ -159,10 +159,12 @@ async def download(req: DownloadRequest):
         safe_name = re.sub(r"[^\w\-]", "_", url.split("/")[-1] or "download")
         filename = f"{safe_name}_{fmt}.zip"
 
+        file_size = zip_path.stat().st_size
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",
             filename=filename,
+            headers={"Content-Length": str(file_size)},
         )
 
     except HTTPException:
