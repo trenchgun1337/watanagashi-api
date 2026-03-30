@@ -1,7 +1,7 @@
 """
 Watanagashi Archive — Download Backend
 FastAPI + yt-dlp + spotdl
-Supports: Spotify, YouTube, SoundCloud
+Supports: Spotify, YouTube (audio + video), SoundCloud
 """
 
 import os
@@ -14,9 +14,9 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 app = FastAPI(title="Watanagashi Downloader API")
@@ -34,6 +34,10 @@ TMP_DIR = Path(tempfile.gettempdir()) / "wata_downloads"
 TMP_DIR.mkdir(exist_ok=True)
 
 COOKIES_FILE = TMP_DIR / "yt_cookies.txt"
+
+AUDIO_FORMATS = {"mp3", "flac", "ogg", "opus", "aac"}
+VIDEO_FORMATS = {"mp4", "webm", "mkv"}
+ALL_FORMATS   = AUDIO_FORMATS | VIDEO_FORMATS
 
 
 class DownloadRequest(BaseModel):
@@ -66,14 +70,13 @@ async def run(cmd: list[str], cwd: str) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
-# ── Health check — GET e HEAD ────────────────────────────────────────────────
+# ── Health check ─────────────────────────────────────────────────────────────
 @app.get("/")
 @app.head("/")
 def root():
     return {"status": "ok", "message": "Watanagashi Downloader API is running."}
 
 
-# ── robots.txt e favicon — evita 404 nos logs ────────────────────────────────
 @app.get("/robots.txt")
 @app.head("/robots.txt")
 def robots():
@@ -86,18 +89,18 @@ def favicon():
     return Response(status_code=204)
 
 
-# ── YouTube status — GET e HEAD ──────────────────────────────────────────────
 @app.get("/yt-status")
 @app.head("/yt-status")
 def yt_status():
-    """Returns whether YouTube cookies are configured on the server."""
     return {"youtube_enabled": has_yt_cookies()}
 
 
+# ── Download ──────────────────────────────────────────────────────────────────
 @app.post("/download")
 async def download(req: DownloadRequest):
     url = req.url.strip()
-    fmt = req.format if req.format in ("mp3", "flac", "ogg") else "mp3"
+    fmt = req.format if req.format in ALL_FORMATS else "mp3"
+    is_video = fmt in VIDEO_FORMATS
 
     try:
         source = detect_source(url)
@@ -108,6 +111,12 @@ async def download(req: DownloadRequest):
         raise HTTPException(
             status_code=503,
             detail="YouTube downloads are not available at this time. The server administrator needs to configure authentication cookies."
+        )
+
+    if is_video and source != "youtube":
+        raise HTTPException(
+            status_code=400,
+            detail="Video formats (mp4/webm/mkv) are only supported for YouTube URLs."
         )
 
     job_id = uuid.uuid4().hex
@@ -125,20 +134,45 @@ async def download(req: DownloadRequest):
 
         elif source == "youtube":
             is_playlist = "list=" in url
-            cmd = [
+
+            # Common yt-dlp flags
+            base_flags = [
                 "yt-dlp",
-                "-x",
-                "--audio-format", fmt,
-                "--audio-quality", "0",
-                "--embed-thumbnail",
-                "--add-metadata",
-                "--cookies", str(COOKIES_FILE),
                 "--no-check-certificates",
                 "--force-ipv4",
-                "--yes-playlist" if is_playlist else "--no-playlist",
-                "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
-                url,
+                "--cookies", str(COOKIES_FILE),
+                # Use the extractor-args to pass po_token / bypass n-sig issues
+                "--extractor-args", "youtube:player_client=web,default",
+                # Retry on fragment errors
+                "--retries", "5",
+                "--fragment-retries", "5",
             ]
+
+            playlist_flag = ["--yes-playlist"] if is_playlist else ["--no-playlist"]
+
+            if is_video:
+                # Download best video + audio and merge
+                format_str = "bestvideo[ext={ext}]+bestaudio/best[ext={ext}]/bestvideo+bestaudio/best".format(ext=fmt)
+                cmd = base_flags + [
+                    "-f", format_str,
+                    "--merge-output-format", fmt,
+                    "--add-metadata",
+                    "--embed-thumbnail",
+                ] + playlist_flag + [
+                    "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
+                    url,
+                ]
+            else:
+                cmd = base_flags + [
+                    "-x",
+                    "--audio-format", fmt,
+                    "--audio-quality", "0",
+                    "--embed-thumbnail",
+                    "--add-metadata",
+                ] + playlist_flag + [
+                    "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
+                    url,
+                ]
 
         else:  # soundcloud
             cmd = [
@@ -156,9 +190,11 @@ async def download(req: DownloadRequest):
 
         if returncode != 0:
             shutil.rmtree(job_dir, ignore_errors=True)
+            # Clean up error message for end users
+            err_msg = stderr[-1000:].strip()
             raise HTTPException(
                 status_code=500,
-                detail=f"Download failed.\n\n{stderr[-800:]}"
+                detail=f"Download failed.\n\n{err_msg}"
             )
 
         files = list(job_dir.glob("*"))
@@ -169,6 +205,25 @@ async def download(req: DownloadRequest):
                 detail="No files generated. Invalid or unavailable content."
             )
 
+        # If single file and it's a video, return directly (no zip)
+        if len(files) == 1 and is_video:
+            file_path = files[0]
+            file_size = file_path.stat().st_size
+            safe_name = re.sub(r"[^\w\-]", "_", file_path.stem[:60])
+            filename = f"{safe_name}.{fmt}"
+            mime = {
+                "mp4": "video/mp4",
+                "webm": "video/webm",
+                "mkv": "video/x-matroska",
+            }.get(fmt, "application/octet-stream")
+            return FileResponse(
+                path=str(file_path),
+                media_type=mime,
+                filename=filename,
+                headers={"Content-Length": str(file_size)},
+            )
+
+        # ZIP everything else
         zip_path = TMP_DIR / f"{job_id}.zip"
         shutil.make_archive(str(TMP_DIR / job_id), "zip", str(job_dir))
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -196,14 +251,14 @@ async def download(req: DownloadRequest):
 
 @app.on_event("startup")
 async def setup():
-    # Limpa ZIPs antigos
+    # Clean old ZIPs
     for f in TMP_DIR.glob("*.zip"):
         try:
             f.unlink()
         except Exception:
             pass
 
-    # Decodifica cookies do env e salva em arquivo
+    # Decode YT cookies from env
     b64 = os.environ.get("YT_COOKIES_B64", "").strip()
     if b64:
         try:
