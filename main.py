@@ -24,8 +24,10 @@ app = FastAPI(title="Watanagashi Downloader API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST", "GET", "HEAD", "OPTIONS"],
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Content-Length"],
 )
 
 TMP_DIR = Path(tempfile.gettempdir()) / "wata_downloads"
@@ -64,13 +66,27 @@ async def run(cmd: list[str], cwd: str) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
-# ── Health check — responde GET e HEAD ──────────────────────────────────────
+# ── Health check — GET e HEAD ────────────────────────────────────────────────
 @app.get("/")
 @app.head("/")
 def root():
     return {"status": "ok", "message": "Watanagashi Downloader API is running."}
 
 
+# ── robots.txt e favicon — evita 404 nos logs ────────────────────────────────
+@app.get("/robots.txt")
+@app.head("/robots.txt")
+def robots():
+    return Response(content="User-agent: *\nDisallow: /", media_type="text/plain")
+
+
+@app.get("/favicon.ico")
+@app.head("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
+
+
+# ── YouTube status — GET e HEAD ──────────────────────────────────────────────
 @app.get("/yt-status")
 @app.head("/yt-status")
 def yt_status():
