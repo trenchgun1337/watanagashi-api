@@ -35,7 +35,6 @@ TMP_DIR.mkdir(exist_ok=True)
 
 COOKIES_FILE = TMP_DIR / "yt_cookies.txt"
 
-# Keep the raw b64 in memory so we can rewrite the file if /tmp was wiped
 _YT_COOKIES_B64: str = ""
 
 AUDIO_FMTS = {"mp3", "flac", "ogg", "opus", "aac"}
@@ -59,7 +58,6 @@ def detect_source(url: str) -> str:
 
 
 def ensure_yt_cookies() -> bool:
-    """Write cookies file from in-memory b64 if missing or empty. Returns True if available."""
     global _YT_COOKIES_B64
     if not _YT_COOKIES_B64:
         return False
@@ -124,7 +122,6 @@ async def download(req: DownloadRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Re-ensure cookies are present before every YT request
     if source == "youtube":
         if not ensure_yt_cookies():
             raise HTTPException(status_code=503,
@@ -141,15 +138,15 @@ async def download(req: DownloadRequest):
     try:
         # ── Spotify ──────────────────────────────────────────────────────────
         if source == "spotify":
+            # spotdl 4.x requires an explicit operation as the first positional arg.
+            # "download" is the correct one. --retries is NOT a valid spotdl flag.
             cmd = [
                 "spotdl",
+                "download",
                 "--format", fmt,
                 "--output", str(job_dir),
                 "--save-errors", str(job_dir / "errors.txt"),
-                # Use YouTube Music as primary source — more reliable than Spotify CDN
                 "--audio", "youtube-music",
-                # Retry on transient failures
-                "--retries", "3",
                 url,
             ]
 
@@ -157,11 +154,9 @@ async def download(req: DownloadRequest):
         elif source == "youtube":
             is_playlist = "list=" in url
 
-            # Use multiple client fallbacks: ios → android → web
-            # ios avoids n-sig challenge; android is a good fallback
             extractor_args = (
                 "youtube:player_client=ios,android,web;"
-                "youtube:skip=dash"          # skip DASH manifests → faster
+                "youtube:skip=dash"
             )
 
             base = [
@@ -174,10 +169,8 @@ async def download(req: DownloadRequest):
                 "--fragment-retries", "10",
                 "--concurrent-fragments", "4",
                 "--no-warnings",
-                # Throttle workaround: sleep between requests
                 "--sleep-interval", "1",
                 "--max-sleep-interval", "3",
-                # Write to stdout progress for debugging
                 "--newline",
             ]
             playlist_flag = ["--yes-playlist"] if is_playlist else ["--no-playlist"]
@@ -222,14 +215,12 @@ async def download(req: DownloadRequest):
 
         returncode, stdout, stderr = await run(cmd, cwd=str(job_dir))
 
-        # Non-zero return is a hard error
         if returncode != 0:
             shutil.rmtree(job_dir, ignore_errors=True)
             err_raw = re.sub(r'\x1b\[[0-9;]*m', '', stderr[-2000:]).strip()
             raise HTTPException(status_code=500,
                 detail=f"Download failed.\n\n{err_raw}")
 
-        # Collect generated files (exclude our errors.txt helper)
         files = [f for f in job_dir.glob("*") if f.name != "errors.txt" and f.is_file()]
 
         if not files:
@@ -237,7 +228,6 @@ async def download(req: DownloadRequest):
             raise HTTPException(status_code=500,
                 detail="No files generated. URL may be invalid, private, or region-locked.")
 
-        # ── Single video: return the file directly (no ZIP) ──────────────────
         if len(files) == 1 and is_video:
             fpath = files[0]
             mime = {"mp4":"video/mp4","webm":"video/webm","mkv":"video/x-matroska"}.get(fmt,"application/octet-stream")
@@ -248,7 +238,6 @@ async def download(req: DownloadRequest):
                 headers={"Content-Length": str(fpath.stat().st_size)},
             )
 
-        # ── Single audio track: return as-is (no ZIP) ────────────────────────
         if len(files) == 1:
             fpath = files[0]
             mime_map = {"mp3":"audio/mpeg","flac":"audio/flac","ogg":"audio/ogg",
@@ -261,7 +250,6 @@ async def download(req: DownloadRequest):
                 headers={"Content-Length": str(fpath.stat().st_size)},
             )
 
-        # ── Multiple files: ZIP ───────────────────────────────────────────────
         zip_path = TMP_DIR / f"{job_id}.zip"
         shutil.make_archive(str(TMP_DIR / job_id), "zip", str(job_dir))
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -287,12 +275,10 @@ async def download(req: DownloadRequest):
 async def setup():
     global _YT_COOKIES_B64
 
-    # Clean stale ZIPs from previous runs
     for f in TMP_DIR.glob("*.zip"):
         try: f.unlink()
         except Exception: pass
 
-    # Load YouTube cookies from env — keep b64 in memory for re-use
     b64 = os.environ.get("YT_COOKIES_B64", "").strip()
     if b64:
         _YT_COOKIES_B64 = b64
