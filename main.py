@@ -14,9 +14,9 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 app = FastAPI(title="Watanagashi Downloader API")
@@ -24,7 +24,7 @@ app = FastAPI(title="Watanagashi Downloader API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST", "GET"],
+    allow_methods=["POST", "GET", "HEAD", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -64,12 +64,15 @@ async def run(cmd: list[str], cwd: str) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
+# ── Health check — responde GET e HEAD ──────────────────────────────────────
 @app.get("/")
+@app.head("/")
 def root():
     return {"status": "ok", "message": "Watanagashi Downloader API is running."}
 
 
 @app.get("/yt-status")
+@app.head("/yt-status")
 def yt_status():
     """Returns whether YouTube cookies are configured on the server."""
     return {"youtube_enabled": has_yt_cookies()}
@@ -105,6 +108,7 @@ async def download(req: DownloadRequest):
             ]
 
         elif source == "youtube":
+            is_playlist = "list=" in url
             cmd = [
                 "yt-dlp",
                 "-x",
@@ -115,7 +119,7 @@ async def download(req: DownloadRequest):
                 "--cookies", str(COOKIES_FILE),
                 "--no-check-certificates",
                 "--force-ipv4",
-                "--no-playlist" if "list=" not in url else "--yes-playlist",
+                "--yes-playlist" if is_playlist else "--no-playlist",
                 "-o", str(job_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
                 url,
             ]
