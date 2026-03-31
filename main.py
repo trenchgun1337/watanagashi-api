@@ -110,6 +110,32 @@ def yt_status():
     return {"youtube_enabled": has_yt_cookies()}
 
 
+# ── Debug endpoints ───────────────────────────────────────────────────────────
+@app.get("/debug-yt")
+async def debug_yt():
+    ensure_yt_cookies()
+    rc, out, err = await run([
+        "yt-dlp",
+        "--cookies", str(COOKIES_FILE),
+        "--extractor-args", "youtube:player_client=ios",
+        "--get-title",
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    ], cwd=str(TMP_DIR))
+    return {"returncode": rc, "stdout": out[-1000:], "stderr": err[-1000:]}
+
+@app.get("/debug-sp")
+async def debug_sp():
+    job_dir = TMP_DIR / "dbg_sp"
+    job_dir.mkdir(exist_ok=True)
+    rc, out, err = await run([
+        "spotdl", "download",
+        "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
+        "--format", "mp3",
+        "--output", str(job_dir),
+    ], cwd=str(job_dir))
+    return {"returncode": rc, "stdout": out[-2000:], "stderr": err[-2000:]}
+
+
 # ── Download ──────────────────────────────────────────────────────────────────
 @app.post("/download")
 async def download(req: DownloadRequest):
@@ -138,26 +164,23 @@ async def download(req: DownloadRequest):
     try:
         # ── Spotify ──────────────────────────────────────────────────────────
         if source == "spotify":
-            # spotdl 4.x requires an explicit operation as the first positional arg.
-            # "download" is the correct one. --retries is NOT a valid spotdl flag.
+            # URL must come right after the operation, before flags
             cmd = [
                 "spotdl",
                 "download",
+                url,                               # URL antes das flags
                 "--format", fmt,
                 "--output", str(job_dir),
                 "--save-errors", str(job_dir / "errors.txt"),
                 "--audio", "youtube-music",
-                url,
             ]
 
         # ── YouTube ──────────────────────────────────────────────────────────
         elif source == "youtube":
             is_playlist = "list=" in url
 
-            extractor_args = (
-                "youtube:player_client=ios,android,web;"
-                "youtube:skip=dash"
-            )
+            # ios client bypasses JS challenge — works without Node.js on server
+            extractor_args = "youtube:player_client=ios"
 
             base = [
                 "yt-dlp",
@@ -270,29 +293,7 @@ async def download(req: DownloadRequest):
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
-@app.get("/debug-yt")
-async def debug_yt():
-    ensure_yt_cookies()
-    rc, out, err = await run([
-        "yt-dlp",
-        "--cookies", str(COOKIES_FILE),
-        "--get-title",
-        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    ], cwd=str(TMP_DIR))
-    return {"returncode": rc, "stdout": out[-1000:], "stderr": err[-1000:]}
 
-@app.get("/debug-sp")
-async def debug_sp():
-    job_dir = TMP_DIR / "dbg_sp"
-    job_dir.mkdir(exist_ok=True)
-    rc, out, err = await run([
-        "spotdl", "download",
-        "--format", "mp3",
-        "--output", str(job_dir),
-        "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"
-    ], cwd=str(job_dir))
-    return {"returncode": rc, "stdout": out[-2000:], "stderr": err[-2000:]}
-    
 @app.on_event("startup")
 async def setup():
     global _YT_COOKIES_B64
