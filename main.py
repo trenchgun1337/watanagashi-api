@@ -117,7 +117,7 @@ async def debug_yt():
     rc, out, err = await run([
         "yt-dlp",
         "--cookies", str(COOKIES_FILE),
-        "--extractor-args", "youtube:player_client=ios",
+        "--extractor-args", "youtube:player_client=mweb",
         "--get-title",
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     ], cwd=str(TMP_DIR))
@@ -164,7 +164,6 @@ async def download(req: DownloadRequest):
     try:
         # ── Spotify ──────────────────────────────────────────────────────────
         if source == "spotify":
-            # URL must come right after the operation, before flags
             cmd = [
                 "spotdl",
                 "download",
@@ -179,8 +178,9 @@ async def download(req: DownloadRequest):
         elif source == "youtube":
             is_playlist = "list=" in url
 
-            # ios client bypasses JS challenge — works without Node.js on server
-            extractor_args = "youtube:player_client=ios"
+            # mweb: suporta cookies + não precisa de Node.js para resolver
+            # o JS challenge do YouTube — ideal para servidores sem runtime JS
+            extractor_args = "youtube:player_client=mweb"
 
             base = [
                 "yt-dlp",
