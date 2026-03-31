@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="Watanagashi Downloader API")
@@ -27,7 +27,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "Content-Length"],
+    expose_headers=["Content-Disposition", "Content-Length", "X-Final-Filename", "X-Final-Mime"],
 )
 
 TMP_DIR = Path(tempfile.gettempdir()) / "wata_downloads"
@@ -66,9 +66,8 @@ def ensure_yt_cookies() -> bool:
             decoded = base64.b64decode(_YT_COOKIES_B64)
             TMP_DIR.mkdir(exist_ok=True)
             COOKIES_FILE.write_bytes(decoded)
-            print(f"[ensure_yt_cookies] Re-wrote cookies ({len(decoded)} bytes).")
         except Exception as e:
-            print(f"[ensure_yt_cookies] Failed to write cookies: {e}")
+            print(f"[ensure_yt_cookies] Failed: {e}")
             return False
     return COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
@@ -117,7 +116,7 @@ async def debug_yt():
     rc, out, err = await run([
         "yt-dlp",
         "--cookies", str(COOKIES_FILE),
-        "--extractor-args", "youtube:player_client=mweb",
+        "--extractor-args", "youtube:player_client=tv_embedded",
         "--get-title",
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     ], cwd=str(TMP_DIR))
@@ -125,18 +124,44 @@ async def debug_yt():
 
 @app.get("/debug-sp")
 async def debug_sp():
+    """Streams newline-separated JSON lines to keep connection alive during long spotdl run."""
     job_dir = TMP_DIR / "dbg_sp"
     job_dir.mkdir(exist_ok=True)
-    rc, out, err = await run([
-        "spotdl", "download",
-        "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
-        "--format", "mp3",
-        "--output", str(job_dir),
-    ], cwd=str(job_dir))
-    return {"returncode": rc, "stdout": out[-2000:], "stderr": err[-2000:]}
+
+    async def generate():
+        yield '{"status":"starting"}\n'
+        proc = await asyncio.create_subprocess_exec(
+            "spotdl", "download",
+            "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
+            "--format", "mp3",
+            "--output", str(job_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(job_dir),
+        )
+        # Drip keepalive pings while waiting
+        done = asyncio.Event()
+        async def waiter():
+            await proc.wait()
+            done.set()
+        asyncio.create_task(waiter())
+        while not done.is_set():
+            yield '{"status":"working"}\n'
+            try:
+                await asyncio.wait_for(asyncio.shield(done.wait()), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+        stdout = (await proc.stdout.read()).decode(errors="replace")
+        stderr = (await proc.stderr.read()).decode(errors="replace")
+        import json
+        yield json.dumps({"returncode": proc.returncode,
+                          "stdout": stdout[-2000:],
+                          "stderr": stderr[-2000:]}) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
-# ── Download ──────────────────────────────────────────────────────────────────
+# ── Download (streaming to avoid proxy timeout) ───────────────────────────────
 @app.post("/download")
 async def download(req: DownloadRequest):
     url = req.url.strip()
@@ -167,7 +192,7 @@ async def download(req: DownloadRequest):
             cmd = [
                 "spotdl",
                 "download",
-                url,                               # URL antes das flags
+                url,
                 "--format", fmt,
                 "--output", str(job_dir),
                 "--save-errors", str(job_dir / "errors.txt"),
@@ -178,9 +203,8 @@ async def download(req: DownloadRequest):
         elif source == "youtube":
             is_playlist = "list=" in url
 
-            # mweb: suporta cookies + não precisa de Node.js para resolver
-            # o JS challenge do YouTube — ideal para servidores sem runtime JS
-            extractor_args = "youtube:player_client=mweb"
+            # tv_embedded: no JS challenge, no PO Token needed, supports cookies
+            extractor_args = "youtube:player_client=tv_embedded"
 
             base = [
                 "yt-dlp",
@@ -192,8 +216,6 @@ async def download(req: DownloadRequest):
                 "--fragment-retries", "10",
                 "--concurrent-fragments", "4",
                 "--no-warnings",
-                "--sleep-interval", "1",
-                "--max-sleep-interval", "3",
                 "--newline",
             ]
             playlist_flag = ["--yes-playlist"] if is_playlist else ["--no-playlist"]
