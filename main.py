@@ -270,7 +270,29 @@ async def download(req: DownloadRequest):
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
+@app.get("/debug-yt")
+async def debug_yt():
+    ensure_yt_cookies()
+    rc, out, err = await run([
+        "yt-dlp",
+        "--cookies", str(COOKIES_FILE),
+        "--get-title",
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    ], cwd=str(TMP_DIR))
+    return {"returncode": rc, "stdout": out[-1000:], "stderr": err[-1000:]}
 
+@app.get("/debug-sp")
+async def debug_sp():
+    job_dir = TMP_DIR / "dbg_sp"
+    job_dir.mkdir(exist_ok=True)
+    rc, out, err = await run([
+        "spotdl", "download",
+        "--format", "mp3",
+        "--output", str(job_dir),
+        "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"
+    ], cwd=str(job_dir))
+    return {"returncode": rc, "stdout": out[-2000:], "stderr": err[-2000:]}
+    
 @app.on_event("startup")
 async def setup():
     global _YT_COOKIES_B64
