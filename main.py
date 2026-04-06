@@ -57,12 +57,31 @@ def detect_source(url: str) -> str:
     raise ValueError("URL not recognized. Supported: Spotify, YouTube, SoundCloud.")
 
 
-def fix_b64_padding(b64: str) -> str:
-    """Remove whitespace e corrige padding faltando no base64."""
-    b64 = b64.strip().replace("\n", "").replace("\r", "").replace(" ", "")
-    # Adiciona '=' até o comprimento ser múltiplo de 4
-    b64 += "=" * (-len(b64) % 4)
-    return b64
+def decode_cookies_b64(raw: str) -> bytes:
+    """
+    Decodifica base64 das cookies com robustez:
+    - Remove whitespace / quebras de linha externas e internas
+    - Corrige padding faltando
+    - Converte \\n literal em quebra de linha real (caso o env var tenha escapado)
+    """
+    cleaned = raw.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    cleaned += "=" * (-len(cleaned) % 4)
+    decoded = base64.b64decode(cleaned)
+    if b"\\n" in decoded:
+        decoded = decoded.replace(b"\\n", b"\n")
+    return decoded
+
+
+def write_cookies(raw_b64: str) -> bool:
+    try:
+        decoded = decode_cookies_b64(raw_b64)
+        TMP_DIR.mkdir(exist_ok=True)
+        COOKIES_FILE.write_bytes(decoded)
+        print(f"[cookies] Written {len(decoded)} bytes — {len(decoded.splitlines())} lines")
+        return True
+    except Exception as e:
+        print(f"[cookies] Failed to decode/write: {e}")
+        return False
 
 
 def ensure_yt_cookies() -> bool:
@@ -70,15 +89,8 @@ def ensure_yt_cookies() -> bool:
     if not _YT_COOKIES_B64:
         return False
     if not COOKIES_FILE.exists() or COOKIES_FILE.stat().st_size == 0:
-        try:
-            b64 = fix_b64_padding(_YT_COOKIES_B64)
-            decoded = base64.b64decode(b64)
-            TMP_DIR.mkdir(exist_ok=True)
-            COOKIES_FILE.write_bytes(decoded)
-        except Exception as e:
-            print(f"[ensure_yt_cookies] Failed: {e}")
-            return False
-    return COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
+        return write_cookies(_YT_COOKIES_B64)
+    return True
 
 
 def has_yt_cookies() -> bool:
@@ -125,15 +137,27 @@ async def debug_yt():
     rc, out, err = await run([
         "yt-dlp",
         "--cookies", str(COOKIES_FILE),
-        "--extractor-args", "youtube:player_client=tv_embedded",
         "--get-title",
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     ], cwd=str(TMP_DIR))
     return {"returncode": rc, "stdout": out[-1000:], "stderr": err[-1000:]}
 
+@app.get("/debug-cookies")
+async def debug_cookies():
+    """Mostra as primeiras linhas do arquivo de cookies para diagnóstico."""
+    if not COOKIES_FILE.exists():
+        return {"exists": False}
+    content = COOKIES_FILE.read_text(errors="replace")
+    lines = content.splitlines()
+    return {
+        "exists": True,
+        "size_bytes": COOKIES_FILE.stat().st_size,
+        "line_count": len(lines),
+        "first_5_lines": lines[:5],
+    }
+
 @app.get("/debug-sp")
 async def debug_sp():
-    """Streams newline-separated JSON lines to keep connection alive during long spotdl run."""
     job_dir = TMP_DIR / "dbg_sp"
     job_dir.mkdir(exist_ok=True)
 
@@ -169,7 +193,7 @@ async def debug_sp():
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
-# ── Download (streaming to avoid proxy timeout) ───────────────────────────────
+# ── Download ──────────────────────────────────────────────────────────────────
 @app.post("/download")
 async def download(req: DownloadRequest):
     url = req.url.strip()
@@ -211,14 +235,13 @@ async def download(req: DownloadRequest):
         elif source == "youtube":
             is_playlist = "list=" in url
 
-            extractor_args = "youtube:player_client=tv_embedded"
-
             base = [
                 "yt-dlp",
                 "--no-check-certificates",
                 "--force-ipv4",
                 "--cookies", str(COOKIES_FILE),
-                "--extractor-args", extractor_args,
+                # web_creator: suporta cookies, retorna formatos completos de áudio/vídeo
+                "--extractor-args", "youtube:player_client=web_creator",
                 "--retries", "10",
                 "--fragment-retries", "10",
                 "--concurrent-fragments", "4",
@@ -334,12 +357,8 @@ async def setup():
     raw_b64 = os.environ.get("YT_COOKIES_B64", "").strip()
     if raw_b64:
         _YT_COOKIES_B64 = raw_b64
-        try:
-            b64 = fix_b64_padding(raw_b64)
-            decoded = base64.b64decode(b64)
-            COOKIES_FILE.write_bytes(decoded)
-            print(f"[startup] YouTube cookies loaded ({len(decoded)} bytes).")
-        except Exception as e:
-            print(f"[startup] Failed to decode YT_COOKIES_B64: {e}")
+        ok = write_cookies(raw_b64)
+        if not ok:
+            print("[startup] YouTube cookies FAILED — YouTube will be disabled.")
     else:
         print("[startup] YT_COOKIES_B64 not set — YouTube downloads disabled.")
