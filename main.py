@@ -58,12 +58,6 @@ def detect_source(url: str) -> str:
 
 
 def decode_cookies_b64(raw: str) -> bytes:
-    """
-    Decodifica base64 das cookies com robustez:
-    - Remove whitespace / quebras de linha externas e internas
-    - Corrige padding faltando
-    - Converte \\n literal em quebra de linha real (caso o env var tenha escapado)
-    """
     cleaned = raw.strip().replace("\n", "").replace("\r", "").replace(" ", "")
     cleaned += "=" * (-len(cleaned) % 4)
     decoded = base64.b64decode(cleaned)
@@ -144,7 +138,6 @@ async def debug_yt():
 
 @app.get("/debug-cookies")
 async def debug_cookies():
-    """Mostra as primeiras linhas do arquivo de cookies para diagnóstico."""
     if not COOKIES_FILE.exists():
         return {"exists": False}
     content = COOKIES_FILE.read_text(errors="replace")
@@ -240,8 +233,6 @@ async def download(req: DownloadRequest):
                 "--no-check-certificates",
                 "--force-ipv4",
                 "--cookies", str(COOKIES_FILE),
-                # web_creator: suporta cookies, retorna formatos completos de áudio/vídeo
-                "--extractor-args", "youtube:player_client=web_creator",
                 "--retries", "10",
                 "--fragment-retries", "10",
                 "--concurrent-fragments", "4",
@@ -265,8 +256,10 @@ async def download(req: DownloadRequest):
                     "--embed-thumbnail",
                 ] + playlist_flag + ["-o", out_tmpl, url]
             else:
+                # bestaudio sem restrição de codec — funciona com qualquer cliente
                 cmd = base + [
-                    "-x",
+                    "-f", "bestaudio/best",
+                    "--extract-audio",
                     "--audio-format", fmt,
                     "--audio-quality", "0",
                     "--embed-thumbnail",
