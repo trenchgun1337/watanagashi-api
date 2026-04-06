@@ -57,13 +57,22 @@ def detect_source(url: str) -> str:
     raise ValueError("URL not recognized. Supported: Spotify, YouTube, SoundCloud.")
 
 
+def fix_b64_padding(b64: str) -> str:
+    """Remove whitespace e corrige padding faltando no base64."""
+    b64 = b64.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    # Adiciona '=' até o comprimento ser múltiplo de 4
+    b64 += "=" * (-len(b64) % 4)
+    return b64
+
+
 def ensure_yt_cookies() -> bool:
     global _YT_COOKIES_B64
     if not _YT_COOKIES_B64:
         return False
     if not COOKIES_FILE.exists() or COOKIES_FILE.stat().st_size == 0:
         try:
-            decoded = base64.b64decode(_YT_COOKIES_B64)
+            b64 = fix_b64_padding(_YT_COOKIES_B64)
+            decoded = base64.b64decode(b64)
             TMP_DIR.mkdir(exist_ok=True)
             COOKIES_FILE.write_bytes(decoded)
         except Exception as e:
@@ -139,7 +148,6 @@ async def debug_sp():
             stderr=asyncio.subprocess.PIPE,
             cwd=str(job_dir),
         )
-        # Drip keepalive pings while waiting
         done = asyncio.Event()
         async def waiter():
             await proc.wait()
@@ -203,7 +211,6 @@ async def download(req: DownloadRequest):
         elif source == "youtube":
             is_playlist = "list=" in url
 
-            # tv_embedded: no JS challenge, no PO Token needed, supports cookies
             extractor_args = "youtube:player_client=tv_embedded"
 
             base = [
@@ -324,10 +331,11 @@ async def setup():
         try: f.unlink()
         except Exception: pass
 
-    b64 = os.environ.get("YT_COOKIES_B64", "").strip()
-    if b64:
-        _YT_COOKIES_B64 = b64
+    raw_b64 = os.environ.get("YT_COOKIES_B64", "").strip()
+    if raw_b64:
+        _YT_COOKIES_B64 = raw_b64
         try:
+            b64 = fix_b64_padding(raw_b64)
             decoded = base64.b64decode(b64)
             COOKIES_FILE.write_bytes(decoded)
             print(f"[startup] YouTube cookies loaded ({len(decoded)} bytes).")
